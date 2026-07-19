@@ -190,9 +190,11 @@ export class BrowserManager {
     return this.tabs.get(id)?.view.webContents;
   }
 
-  private sendTabUpdate(id: string) {
+   private sendTabUpdate(id: string) {
     const tab = this.tabs.get(id);
     if (!tab) return;
+    if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return;
+    if (tab.view.webContents.isDestroyed()) return;
     const { view: _view, ...info } = tab;
     this.win.webContents.send('tab-updated', info);
   }
