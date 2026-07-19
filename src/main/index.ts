@@ -5,6 +5,13 @@ import { setupIpcHandlers } from './ipc-handlers';
 import { BrowserManager } from './browser-manager';
 import { ProxyManager } from './proxy-manager';
 import { AgentEngine } from './agent-engine';
+// Prevent crash dialogs — log errors silently instead
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
 
 const store = new SimpleStore();
 let mainWindow: BrowserWindow | null = null;
