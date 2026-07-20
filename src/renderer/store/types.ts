@@ -27,9 +27,18 @@ export interface AgentTaskInput {
   urls: string[];
   country: string;
   countryCode: string;
-  proxyHost: string;
-  proxyPort: number;
-  proxyProtocol: 'http' | 'socks5';
+  /**
+   * Proxy list — one entry per line.
+   * Supported formats:
+   *   host:port
+   *   host:port:username:password
+   *   http://username:password@host:port
+   *   socks5://username:password@host:port
+   *
+   * The engine rotates through this list, one proxy per visit.
+   * If a proxy fails, it falls back to direct (no proxy) for that visit.
+   */
+  proxyList: string[];
   visitCount: number;
   deviceType: 'desktop' | 'mobile' | 'tablet';
   timeOnPageMin: number;
