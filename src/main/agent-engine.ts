@@ -1,6 +1,21 @@
-import { BrowserWindow, WebContentsView, session } from 'electron';
+/**
+ * Agent Engine — controls a VISIBLE browser tab, just like AI browser agents.
+ *
+ * Flow for each visit:
+ *  1. Navigate the visible tab to Google.com
+ *  2. Type the keyword into the search box and submit
+ *  3. Wait for Google results to load
+ *  4. Navigate to the target URL
+ *  5. Scroll the page naturally for the configured duration
+ *  6. Optionally visit internal links
+ *  7. Log every step to the activity log (shown in sidebar)
+ */
+
+import { WebContents } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 import { ProxyManager } from './proxy-manager';
+
+// ── Types ────────────────────────────────────────────────────────────────────
 
 export interface AgentTask {
   id: string;
@@ -45,29 +60,16 @@ export interface AgentTaskInput {
   maxInternalLinks: number;
 }
 
-const DEVICE_PROFILES: Record<string, Electron.WebPreferences & { userAgent: string; viewport: { width: number; height: number } }> = {
-  desktop: {
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    viewport: { width: 1440, height: 900 },
-  },
-  mobile: {
-    userAgent:
-      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-    viewport: { width: 390, height: 844 },
-  },
-  tablet: {
-    userAgent:
-      'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-    viewport: { width: 1024, height: 1366 },
-  },
+const USER_AGENTS: Record<string, string> = {
+  desktop:
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  mobile:
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  tablet:
+    'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
 };
 
-const SCROLL_SPEEDS: Record<string, { min: number; max: number; pause: number }> = {
-  slow: { min: 200, max: 600, pause: 2000 },
-  medium: { min: 600, max: 1200, pause: 1000 },
-  fast: { min: 1200, max: 2000, pause: 500 },
-};
+// ── Engine ───────────────────────────────────────────────────────────────────
 
 export class AgentEngine {
   private tasks: Map<string, AgentTask> = new Map();
@@ -99,7 +101,11 @@ export class AgentEngine {
     return task;
   }
 
-  async startTask(taskId: string): Promise<void> {
+  /**
+   * Start a task controlling the provided visible WebContents.
+   * Called from the main process after a dedicated tab is created.
+   */
+  async startTask(taskId: string, webContents: WebContents): Promise<void> {
     const task = this.tasks.get(taskId);
     if (!task || task.status === 'running') return;
 
@@ -110,11 +116,16 @@ export class AgentEngine {
     this.runningTasks.set(taskId, true);
     this.emitStatus(task);
 
+    // Apply user agent based on device type
     try {
-      await this.runTask(task);
+      webContents.setUserAgent(USER_AGENTS[task.deviceType] || USER_AGENTS.desktop);
+    } catch { /* ignore */ }
+
+    try {
+      await this.runVisibleTask(task, webContents);
     } catch (err) {
       task.status = 'error';
-      task.logs.push(`Error: ${(err as Error).message}`);
+      task.logs.push(`❌ Error: ${(err as Error).message}`);
       this.emitStatus(task);
     } finally {
       this.runningTasks.delete(taskId);
@@ -126,7 +137,7 @@ export class AgentEngine {
     const task = this.tasks.get(taskId);
     if (task) {
       task.status = 'idle';
-      task.logs.push('Task stopped by user.');
+      task.logs.push('⏹ Stopped by user.');
       this.emitStatus(task);
     }
   }
@@ -144,198 +155,278 @@ export class AgentEngine {
     this.tasks.delete(taskId);
   }
 
-  private async runTask(task: AgentTask): Promise<void> {
-    const device = DEVICE_PROFILES[task.deviceType] || DEVICE_PROFILES.desktop;
+  // ── Core visible-tab automation ──────────────────────────────────────────
 
-    for (let visit = 0; visit < task.visitCount; visit++) {
+  private async runVisibleTask(task: AgentTask, wc: WebContents): Promise<void> {
+    for (let visitNum = 0; visitNum < task.visitCount; visitNum++) {
       for (const targetUrl of task.urls) {
-        if (!this.runningTasks.get(task.id)) {
-          task.status = 'idle';
+        if (!this.isRunning(task)) return;
+
+        const visitIndex = visitNum * task.urls.length + task.urls.indexOf(targetUrl) + 1;
+        const visitLabel = `Visit ${task.completedVisits + 1}/${task.totalVisits}`;
+
+        // ── Step 1: Go to Google ────────────────────────────────────────────
+        if (task.keyword) {
+          task.logs.push(`${visitLabel}: 🔍 Opening Google...`);
           this.emitStatus(task);
-          return;
+
+          await this.navigateTo(wc, 'https://www.google.com');
+          if (!this.isRunning(task)) return;
+
+          await this.sleep(800 + Math.random() * 600);
+
+          // ── Step 2: Type keyword into search box ──────────────────────────
+          task.logs.push(`${visitLabel}: ⌨️  Typing "${task.keyword}"...`);
+          this.emitStatus(task);
+
+          await this.typeAndSearch(wc, task.keyword);
+          if (!this.isRunning(task)) return;
+
+          // Wait for results page
+          await this.sleep(2000 + Math.random() * 1000);
+          await this.waitForIdle(wc, 8000);
+          if (!this.isRunning(task)) return;
+
+          task.logs.push(`${visitLabel}: ✅ Google results loaded`);
+          this.emitStatus(task);
+          await this.sleep(1000 + Math.random() * 800);
         }
 
-        task.logs.push(`Visit ${task.completedVisits + 1}/${task.totalVisits}: ${targetUrl}`);
+        // ── Step 3: Navigate to the target site ───────────────────────────
+        task.logs.push(`${visitLabel}: 🌐 Navigating to ${targetUrl}`);
         this.emitStatus(task);
 
-        // Create invisible agent window
-        const agentWindow = new BrowserWindow({
-          show: false,
-          width: device.viewport.width,
-          height: device.viewport.height,
-          webPreferences: {
-            nodeIntegration: false,
-            contextIsolation: true,
-            sandbox: true,
-            javascript: true,
-          },
-        });
+        await this.navigateTo(wc, targetUrl);
+        if (!this.isRunning(task)) return;
 
-        try {
-          // Set proxy if configured
-          if (task.proxyHost && task.proxyPort) {
-            const proxyRules =
-              task.proxyProtocol === 'socks5'
-                ? `socks5://${task.proxyHost}:${task.proxyPort}`
-                : `http://${task.proxyHost}:${task.proxyPort}`;
-            await agentWindow.webContents.session.setProxy({ proxyRules });
-          }
+        task.logs.push(`${visitLabel}: ✅ Page loaded`);
+        this.emitStatus(task);
 
-          // Set user agent
-          agentWindow.webContents.setUserAgent(device.userAgent);
+        // ── Step 4: Scroll the page ───────────────────────────────────────
+        const timeMs =
+          (task.timeOnPageMin +
+            Math.random() * (task.timeOnPageMax - task.timeOnPageMin)) *
+          1000;
+        task.logs.push(
+          `${visitLabel}: 📜 Scrolling page for ${Math.round(timeMs / 1000)}s...`
+        );
+        this.emitStatus(task);
 
-          // Navigate to target
-          await new Promise<void>((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('Page load timeout')), 30000);
+        await this.scrollPage(wc, task, timeMs);
+        if (!this.isRunning(task)) return;
 
-            agentWindow.webContents.once('did-finish-load', () => {
-              clearTimeout(timeout);
-              resolve();
-            });
+        // ── Step 5: Visit internal links ──────────────────────────────────
+        if (task.clickInternalLinks) {
+          await this.visitInternalLinks(wc, task, targetUrl);
+          if (!this.isRunning(task)) return;
+        }
 
-            agentWindow.webContents.once('did-fail-load', (_, code, desc) => {
-              clearTimeout(timeout);
-              reject(new Error(`Load failed: ${desc} (${code})`));
-            });
+        // ── Done with this visit ──────────────────────────────────────────
+        task.completedVisits++;
+        task.progress = Math.round(
+          (task.completedVisits / task.totalVisits) * 100
+        );
+        task.logs.push(`${visitLabel}: 🎯 Complete (${task.progress}%)`);
+        this.emitStatus(task);
 
-            agentWindow.webContents.loadURL(targetUrl);
-          });
-
-          // Calculate time to spend on page
-          const timeMin = task.timeOnPageMin * 1000;
-          const timeMax = task.timeOnPageMax * 1000;
-          const timeOnPage = timeMin + Math.random() * (timeMax - timeMin);
-
-          task.logs.push(
-            `  Browsing for ${Math.round(timeOnPage / 1000)}s on ${targetUrl}`
-          );
-          this.emitStatus(task);
-
-          // Simulate scrolling behavior
-          await this.simulateScrolling(agentWindow, task, timeOnPage);
-
-          // Click internal links if enabled
-          if (task.clickInternalLinks) {
-            await this.simulateInternalNavigation(agentWindow, task, targetUrl);
-          }
-
-          task.completedVisits++;
-          task.progress = Math.round((task.completedVisits / task.totalVisits) * 100);
-          task.logs.push(`  Completed visit ${task.completedVisits}/${task.totalVisits}`);
-          this.emitStatus(task);
-
-          // Random pause between visits (2-8 seconds)
-          await this.sleep(2000 + Math.random() * 6000);
-        } catch (err) {
-          task.logs.push(`  Warning: ${(err as Error).message}`);
-          this.emitStatus(task);
-        } finally {
-          agentWindow.destroy();
+        // Pause between visits
+        if (
+          visitNum < task.visitCount - 1 ||
+          task.urls.indexOf(targetUrl) < task.urls.length - 1
+        ) {
+          await this.sleep(2000 + Math.random() * 3000);
         }
       }
     }
 
     task.status = 'completed';
     task.progress = 100;
-    task.logs.push('All visits completed successfully.');
+    task.logs.push('🎉 All visits completed successfully!');
     this.emitStatus(task);
   }
 
-  private async simulateScrolling(
-    win: BrowserWindow,
+  // ── Navigation helpers ────────────────────────────────────────────────────
+
+  /**
+   * Load a URL and wait for it to finish (with 30s timeout).
+   * Resolves even on error so the task can continue.
+   */
+  private navigateTo(wc: WebContents, url: string): Promise<void> {
+    return new Promise((resolve) => {
+      if (wc.isDestroyed()) { resolve(); return; }
+
+      const done = (reason?: string) => {
+        clearTimeout(timer);
+        wc.removeListener('did-finish-load', onFinish);
+        wc.removeListener('did-fail-load', onFail);
+        resolve();
+      };
+
+      const timer = setTimeout(() => done('timeout'), 30_000);
+      const onFinish = () => done('finish');
+      const onFail = (_e: any, code: number, desc: string) => {
+        // Only bail on real errors, not aborted navigations (-3)
+        if (code !== -3) done(`fail:${desc}`);
+      };
+
+      wc.once('did-finish-load', onFinish);
+      wc.once('did-fail-load', onFail);
+      wc.loadURL(url).catch(() => done('load-error'));
+    });
+  }
+
+  /**
+   * Wait until the page stops loading (network idle), with a max timeout.
+   */
+  private waitForIdle(wc: WebContents, maxMs = 10_000): Promise<void> {
+    return new Promise((resolve) => {
+      if (wc.isDestroyed() || !wc.isLoading()) { resolve(); return; }
+      const timer = setTimeout(resolve, maxMs);
+      wc.once('did-stop-loading', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+
+  /**
+   * Inject JavaScript that fills the Google search textarea and submits the form.
+   * Simulates character-by-character typing for natural appearance.
+   */
+  private async typeAndSearch(wc: WebContents, keyword: string): Promise<void> {
+    if (wc.isDestroyed()) return;
+
+    try {
+      const keywordJson = JSON.stringify(keyword);
+      const charDelay = 60; // ms between characters
+
+      await wc.executeJavaScript(`
+        (function() {
+          // Try textarea first (new Google), then input (old / search results)
+          var el = document.querySelector('textarea[name="q"]')
+                || document.querySelector('input[name="q"]')
+                || document.querySelector('input[type="search"]')
+                || document.querySelector('[role="combobox"]');
+
+          if (!el) return 'no-input';
+
+          el.focus();
+          el.value = '';
+
+          var chars = ${keywordJson}.split('');
+          var delay = 0;
+
+          chars.forEach(function(ch) {
+            setTimeout(function() {
+              el.value += ch;
+              el.dispatchEvent(new InputEvent('input', { bubbles: true, data: ch }));
+              el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ch }));
+              el.dispatchEvent(new KeyboardEvent('keyup',  { bubbles: true, key: ch }));
+            }, delay);
+            delay += ${charDelay};
+          });
+
+          // Press Enter after all characters are typed
+          setTimeout(function() {
+            el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', keyCode: 13 }));
+            var form = el.closest('form');
+            if (form) {
+              form.submit();
+            } else {
+              el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, key: 'Enter', keyCode: 13 }));
+            }
+          }, delay + 100);
+
+          return 'typed';
+        })();
+      `);
+
+      // Wait for typing + Enter to land
+      await this.sleep(keyword.length * charDelay + 400);
+    } catch { /* page may have navigated, that's fine */ }
+  }
+
+  /**
+   * Smoothly scroll the page up and down for `durationMs` milliseconds.
+   */
+  private async scrollPage(
+    wc: WebContents,
     task: AgentTask,
     durationMs: number
   ): Promise<void> {
-    const speed = SCROLL_SPEEDS[task.scrollSpeed] || SCROLL_SPEEDS.medium;
-    const startTime = Date.now();
+    const speeds = {
+      slow:   { step: 120, pause: 900 },
+      medium: { step: 280, pause: 550 },
+      fast:   { step: 480, pause: 300 },
+    };
+    const { step, pause } = speeds[task.scrollSpeed] || speeds.medium;
+    const end = Date.now() + durationMs;
 
-    while (Date.now() - startTime < durationMs) {
-      if (!this.runningTasks.get(task.id)) break;
+    while (Date.now() < end && this.isRunning(task)) {
+      if (wc.isDestroyed()) break;
 
-      // Calculate scroll distance
-      const scrollAmount = speed.min + Math.random() * (speed.max - speed.min);
-      const direction = Math.random() > 0.2 ? 1 : -1; // 80% down, 20% up
+      const direction = Math.random() > 0.25 ? 1 : -1; // 75% down, 25% up
+      const amount = step + Math.random() * step;
 
-      await win.webContents.executeJavaScript(`
-        (function() {
-          var amount = ${scrollAmount * direction};
-          var duration = ${speed.pause};
-          var start = window.scrollY;
-          var target = Math.max(0, Math.min(start + amount, document.body.scrollHeight - window.innerHeight));
-          var startTime = performance.now();
-          
-          function step(now) {
-            var elapsed = now - startTime;
-            var progress = Math.min(elapsed / duration, 1);
-            // Ease in-out
-            var ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
-            window.scrollTo(0, start + (target - start) * ease);
-            if (progress < 1) requestAnimationFrame(step);
-          }
-          
-          requestAnimationFrame(step);
-        })();
-      `).catch(() => {});
+      try {
+        await wc.executeJavaScript(`
+          (function() {
+            var target = window.scrollY + (${amount} * ${direction});
+            target = Math.max(0, Math.min(target, document.body.scrollHeight - window.innerHeight));
+            window.scrollTo({ top: target, behavior: 'smooth' });
+          })();
+        `);
+      } catch { break; }
 
-      await this.sleep(speed.pause + Math.random() * 1000);
+      await this.sleep(pause + Math.random() * 300);
     }
   }
 
-  private async simulateInternalNavigation(
-    win: BrowserWindow,
+  /**
+   * Find internal links on the current page and navigate to them one by one.
+   */
+  private async visitInternalLinks(
+    wc: WebContents,
     task: AgentTask,
     baseUrl: string
   ): Promise<void> {
     try {
-      const baseOrigin = new URL(baseUrl).origin;
-      const maxLinks = task.maxInternalLinks || 3;
+      const origin = new URL(baseUrl).origin;
+      const max = task.maxInternalLinks || 3;
 
-      // Find internal links on the page
-      const links = await win.webContents.executeJavaScript(`
+      const links = await wc.executeJavaScript(`
         (function() {
-          var links = Array.from(document.querySelectorAll('a[href]'));
-          var origin = '${baseOrigin}';
-          var internal = links
-            .map(a => a.href)
-            .filter(href => {
+          return Array.from(document.querySelectorAll('a[href]'))
+            .map(function(a) { return a.href; })
+            .filter(function(href) {
               try {
-                var url = new URL(href);
-                return url.origin === origin && url.href !== window.location.href;
+                var u = new URL(href);
+                return u.origin === ${JSON.stringify(origin)} && u.href !== window.location.href;
               } catch(e) { return false; }
             })
-            .slice(0, ${maxLinks * 3});
-          return internal;
+            .slice(0, ${max * 3});
         })();
       `) as string[];
 
       if (!links || links.length === 0) return;
 
-      // Randomly select up to maxLinks links
-      const shuffled = links.sort(() => Math.random() - 0.5).slice(0, maxLinks);
+      const chosen = links.sort(() => Math.random() - 0.5).slice(0, max);
 
-      for (const link of shuffled) {
-        if (!this.runningTasks.get(task.id)) break;
+      for (const link of chosen) {
+        if (!this.isRunning(task)) break;
+        if (wc.isDestroyed()) break;
 
-        task.logs.push(`  Navigating to internal link: ${link}`);
+        task.logs.push(`  🔗 Internal: ${link}`);
         this.emitStatus(task);
 
-        await new Promise<void>((resolve) => {
-          const timeout = setTimeout(resolve, 15000);
-          win.webContents.once('did-finish-load', () => {
-            clearTimeout(timeout);
-            resolve();
-          });
-          win.webContents.loadURL(link);
-        });
-
-        // Spend time on internal page too
-        const innerTime = 8000 + Math.random() * 12000;
-        await this.simulateScrolling(win, task, innerTime);
-        await this.sleep(1000 + Math.random() * 2000);
+        await this.navigateTo(wc, link);
+        await this.scrollPage(wc, task, 6000 + Math.random() * 8000);
+        await this.sleep(1000 + Math.random() * 1500);
       }
-    } catch {
-      // Silently ignore navigation errors
-    }
+    } catch { /* ignore */ }
+  }
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+
+  private isRunning(task: AgentTask): boolean {
+    return !!this.runningTasks.get(task.id);
   }
 
   private sleep(ms: number): Promise<void> {
