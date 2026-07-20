@@ -1,4 +1,5 @@
 import { BrowserWindow, WebContentsView, Rectangle } from 'electron';
+import path from 'path';
 
 export interface TabInfo {
   id: string;
@@ -9,7 +10,7 @@ export interface TabInfo {
   isLoading: boolean;
 }
 
-const CHROME_HEIGHT = 90; // height of tab bar + nav bar
+const CHROME_HEIGHT = 90;
 
 export class BrowserManager {
   private win: BrowserWindow;
@@ -17,11 +18,10 @@ export class BrowserManager {
   private activeTabId: string | null = null;
   private rendererReady = false;
   private pendingUpdates: Array<() => void> = [];
-  private sidebarWidth = 0; // updated from renderer when sidebar opens/closes
+  private sidebarWidth = 0;
 
   constructor(win: BrowserWindow) {
     this.win = win;
-    // Don't send IPC until the renderer HTML has fully loaded
     win.webContents.once('did-finish-load', () => {
       this.rendererReady = true;
       this.pendingUpdates.forEach((fn) => fn());
@@ -29,8 +29,6 @@ export class BrowserManager {
     });
   }
 
-  /** Called by the renderer when the sidebar opens/closes so the browser
-   *  view doesn't overlap the sidebar panel. */
   setSidebarWidth(width: number) {
     this.sidebarWidth = width;
     this.repositionViews();
@@ -46,10 +44,31 @@ export class BrowserManager {
     };
   }
 
+  /**
+   * Create a normal user-browsing tab.
+   */
   createTab(id: string, url = 'about:blank'): TabInfo {
+    return this._createView(id, url, false);
+  }
+
+  /**
+   * Create a stealth agent tab with the agent-preload.js injected so
+   * navigator.webdriver and other bot signals are removed before page scripts run.
+   */
+  createAgentTab(id: string, url = 'about:blank'): TabInfo {
+    return this._createView(id, url, true);
+  }
+
+  private _createView(id: string, url: string, stealth: boolean): TabInfo {
+    const preloadPath = stealth
+      ? path.join(__dirname, 'agent-preload.js')
+      : undefined;
+
     const view = new WebContentsView({
       webPreferences: {
-        sandbox: true,
+        // Use preload only for stealth (agent) tabs
+        ...(preloadPath ? { preload: preloadPath } : {}),
+        sandbox: !stealth,          // stealth tabs need sandbox off for preload
         contextIsolation: true,
         nodeIntegration: false,
         webSecurity: true,
@@ -59,6 +78,7 @@ export class BrowserManager {
 
     view.webContents.loadURL(url).catch(() => {});
 
+    // Wire up events to keep tab state in sync with renderer
     view.webContents.on('did-start-loading', () => {
       const tab = this.tabs.get(id);
       if (tab && !view.webContents.isDestroyed()) {
@@ -121,109 +141,102 @@ export class BrowserManager {
   }
 
   activateTab(id: string) {
-    // Remove currently active tab from view
     if (this.activeTabId && this.activeTabId !== id) {
-      const currentTab = this.tabs.get(this.activeTabId);
-      if (currentTab) {
-        try { this.win.contentView.removeChildView(currentTab.view); } catch { /* ignore */ }
+      const cur = this.tabs.get(this.activeTabId);
+      if (cur) {
+        try { this.win.contentView.removeChildView(cur.view); } catch { }
       }
     }
-
     const tab = this.tabs.get(id);
     if (!tab) return;
-
     this.activeTabId = id;
     try {
       this.win.contentView.addChildView(tab.view);
       tab.view.setBounds(this.getBrowserBounds());
-    } catch { /* ignore */ }
+    } catch { }
   }
 
   closeTab(id: string) {
     const tab = this.tabs.get(id);
     if (!tab) return;
-
     if (this.activeTabId === id) {
-      try { this.win.contentView.removeChildView(tab.view); } catch { /* ignore */ }
+      try { this.win.contentView.removeChildView(tab.view); } catch { }
       this.activeTabId = null;
     }
-
-    try { (tab.view.webContents as any).destroy(); } catch { /* ignore */ }
+    try { (tab.view.webContents as any).destroy(); } catch { }
     this.tabs.delete(id);
   }
 
   navigateTab(id: string, url: string) {
     const tab = this.tabs.get(id);
     if (!tab) return;
-
-    let navigateUrl = url;
+    let nav = url;
     if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('about:')) {
-      if (url.includes('.') && !url.includes(' ')) {
-        navigateUrl = 'https://' + url;
-      } else {
-        navigateUrl = `https://www.google.com/search?q=${encodeURIComponent(url)}`;
-      }
+      nav = url.includes('.') && !url.includes(' ')
+        ? 'https://' + url
+        : `https://www.google.com/search?q=${encodeURIComponent(url)}`;
     }
-
-    try { tab.view.webContents.loadURL(navigateUrl); } catch { /* ignore */ }
+    try { tab.view.webContents.loadURL(nav); } catch { }
   }
 
   goBack(id: string) {
     const tab = this.tabs.get(id);
-    try {
-      if (tab?.view.webContents.canGoBack()) tab.view.webContents.goBack();
-    } catch { /* ignore */ }
+    try { if (tab?.view.webContents.canGoBack()) tab.view.webContents.goBack(); } catch { }
   }
 
   goForward(id: string) {
     const tab = this.tabs.get(id);
-    try {
-      if (tab?.view.webContents.canGoForward()) tab.view.webContents.goForward();
-    } catch { /* ignore */ }
+    try { if (tab?.view.webContents.canGoForward()) tab.view.webContents.goForward(); } catch { }
   }
 
   reload(id: string) {
     const tab = this.tabs.get(id);
-    try { tab?.view.webContents.reload(); } catch { /* ignore */ }
+    try { tab?.view.webContents.reload(); } catch { }
   }
 
   stopLoading(id: string) {
     const tab = this.tabs.get(id);
-    try { tab?.view.webContents.stop(); } catch { /* ignore */ }
+    try { tab?.view.webContents.stop(); } catch { }
   }
 
   repositionViews() {
-    if (this.activeTabId) {
-      const tab = this.tabs.get(this.activeTabId);
-      try {
-        if (tab && !this.win.isDestroyed()) {
-          tab.view.setBounds(this.getBrowserBounds());
-        }
-      } catch { /* ignore */ }
-    }
+    if (!this.activeTabId) return;
+    const tab = this.tabs.get(this.activeTabId);
+    try {
+      if (tab && !this.win.isDestroyed()) tab.view.setBounds(this.getBrowserBounds());
+    } catch { }
   }
 
   getWebContents(id: string) {
     return this.tabs.get(id)?.view.webContents;
   }
 
-  private sendTabUpdate(id: string) {
+  /** Send a tab-created event to the renderer (used when agent creates a tab). */
+  sendTabCreated(id: string) {
     const tab = this.tabs.get(id);
     if (!tab) return;
-
     const doSend = () => {
       try {
         if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return;
-        const { view: _view, ...info } = tab;
-        this.win.webContents.send('tab-updated', info);
-      } catch { /* ignore */ }
+        const { view: _v, ...info } = tab;
+        this.win.webContents.send('tab-created', info);
+      } catch { }
     };
+    if (this.rendererReady) doSend();
+    else this.pendingUpdates.push(doSend);
+  }
 
-    if (this.rendererReady) {
-      doSend();
-    } else {
-      // Queue until renderer is ready
-      this.pendingUpdates.push(doSend);
-    }
+  private sendTabUpdate(id: string) {
+    const tab = this.tabs.get(id);
+    if (!tab) return;
+    const doSend = () => {
+      try {
+        if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return;
+        const { view: _v, ...info } = tab;
+        this.win.webContents.send('tab-updated', info);
+      } catch { }
+    };
+    if (this.rendererReady) doSend();
+    else this.pendingUpdates.push(doSend);
   }
 }
