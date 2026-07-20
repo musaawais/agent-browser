@@ -6,16 +6,20 @@ import { BrowserManager } from './browser-manager';
 import { ProxyManager } from './proxy-manager';
 import { AgentEngine } from './agent-engine';
 
-// ── Silence crash dialogs ───────────────────────────────────────────────────
+// ── Stealth: remove Chromium automation flag before anything else ─────────────
+// This is the most important step — it removes the flag Google checks first.
+app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+app.commandLine.appendSwitch('disable-infobars');
+app.commandLine.appendSwitch('no-default-browser-check');
+
+// ── Silence crash dialogs ─────────────────────────────────────────────────────
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 process.on('unhandledRejection', (reason) => console.error('[unhandledRejection]', reason));
 
-// ── Persistent store (singleton, survives window lifecycle) ─────────────────
+// ── Singleton store ───────────────────────────────────────────────────────────
 const store = new SimpleStore();
 
-// ── Manager refs – mutated on every createMainWindow call ────────────────────
-// IPC handlers are registered ONCE and always read from these refs.
-// This prevents the "ipcMain.handle already registered" crash on macOS reopen.
+// ── Module-level manager refs — IPC handlers registered ONCE read from here ──
 export const refs = {
   mainWindow: null as BrowserWindow | null,
   browserManager: null as BrowserManager | null,
@@ -23,9 +27,9 @@ export const refs = {
   agentEngine: null as AgentEngine | null,
 };
 
-// ── IPC: all channels registered ONCE ───────────────────────────────────────
+// ── Register ALL IPC handlers exactly once ────────────────────────────────────
 function registerIpcHandlers() {
-  // Browser ──────────────────────────────────────────────────────────────────
+  // ── Browser ────────────────────────────────────────────────────────────────
   ipcMain.handle('browser:new-tab', (_, url?: string) => {
     const bm = refs.browserManager;
     if (!bm) return null;
@@ -70,14 +74,12 @@ function registerIpcHandlers() {
     return { success: true };
   });
 
-  // Tell the main process how wide the sidebar is so the browser view
-  // can shrink its right edge and not cover the sidebar panel.
   ipcMain.handle('browser:set-sidebar-width', (_, width: number) => {
     refs.browserManager?.setSidebarWidth(width);
     return { success: true };
   });
 
-  // Proxy ────────────────────────────────────────────────────────────────────
+  // ── Proxy ─────────────────────────────────────────────────────────────────
   ipcMain.handle('proxy:set', async (_, config) => {
     if (refs.proxyManager) await refs.proxyManager.setProxy(config);
     return { success: true };
@@ -90,15 +92,43 @@ function registerIpcHandlers() {
 
   ipcMain.handle('proxy:get-state', () => refs.proxyManager?.getState() ?? null);
 
-  // Agent ────────────────────────────────────────────────────────────────────
+  // ── Agent ─────────────────────────────────────────────────────────────────
   ipcMain.handle('agent:create-task', (_, input) => {
     if (!refs.agentEngine) throw new Error('Agent engine not ready');
     return refs.agentEngine.createTask(input);
   });
 
-  ipcMain.handle('agent:start-task', async (_, id: string) => {
-    refs.agentEngine?.startTask(id).catch(console.error);
-    return { success: true };
+  ipcMain.handle('agent:start-task', async (_, taskId: string) => {
+    const bm = refs.browserManager;
+    const win = refs.mainWindow;
+    const ae = refs.agentEngine;
+    if (!bm || !win || !ae) return { success: false, error: 'App not ready' };
+
+    // Create a VISIBLE stealth tab for the agent to work in
+    const tabId = uuidv4();
+    bm.createAgentTab(tabId, 'about:blank');
+    bm.activateTab(tabId);
+
+    // Tell renderer to add this tab to its tab bar
+    bm.sendTabCreated(tabId);
+
+    const wc = bm.getWebContents(tabId);
+    if (!wc) return { success: false, error: 'Could not get tab webContents' };
+
+    // Apply proxy to agent tab session if configured
+    const task = ae.getTask(taskId);
+    if (task?.proxyHost && task?.proxyPort) {
+      const proxyRules =
+        task.proxyProtocol === 'socks5'
+          ? `socks5://${task.proxyHost}:${task.proxyPort}`
+          : `http://${task.proxyHost}:${task.proxyPort}`;
+      try { await wc.session.setProxy({ proxyRules }); } catch { }
+    }
+
+    // Run agent in background — do not await so IPC returns immediately
+    ae.startTask(taskId, wc).catch(console.error);
+
+    return { success: true, tabId };
   });
 
   ipcMain.handle('agent:stop-task', (_, id: string) => {
@@ -113,7 +143,7 @@ function registerIpcHandlers() {
 
   ipcMain.handle('agent:get-all-tasks', () => refs.agentEngine?.getAllTasks() ?? []);
 
-  // Store ────────────────────────────────────────────────────────────────────
+  // ── Store ──────────────────────────────────────────────────────────────────
   ipcMain.handle('store:get', (_, key: string) => store.get(key));
 
   ipcMain.handle('store:set', (_, key: string, value: unknown) => {
@@ -122,7 +152,7 @@ function registerIpcHandlers() {
   });
 }
 
-// ── Window factory ───────────────────────────────────────────────────────────
+// ── Window factory ────────────────────────────────────────────────────────────
 function getRendererURL() {
   return `file://${path.join(__dirname, '../renderer/index.html')}`;
 }
@@ -147,19 +177,17 @@ async function createMainWindow() {
   });
 
   refs.mainWindow = win;
-
-  // Create fresh managers for this window
   refs.proxyManager = new ProxyManager();
   refs.agentEngine = new AgentEngine(refs.proxyManager);
   refs.browserManager = new BrowserManager(win);
 
-  // Agent status → renderer (always uses the current win ref)
+  // Forward agent status events to renderer
   refs.agentEngine.onStatusChange((task) => {
     try {
       if (refs.mainWindow && !refs.mainWindow.isDestroyed() && !refs.mainWindow.webContents.isDestroyed()) {
         refs.mainWindow.webContents.send('agent:task-updated', task);
       }
-    } catch { /* ignore */ }
+    } catch { }
   });
 
   win.loadURL(getRendererURL());
@@ -170,26 +198,25 @@ async function createMainWindow() {
     if (refs.mainWindow === win) {
       refs.mainWindow = null;
       refs.browserManager = null;
-      // Keep proxyManager and agentEngine alive briefly so in-flight tasks can log
     }
   });
 
-  // Intercept new-window calls and open them as a new tab instead
+  // Route popup windows (window.open) into new tabs
   app.on('web-contents-created', (_, contents) => {
     contents.setWindowOpenHandler(({ url }) => {
       try {
         if (refs.mainWindow && !refs.mainWindow.isDestroyed()) {
           refs.mainWindow.webContents.send('open-url-in-new-tab', url);
         }
-      } catch { /* ignore */ }
+      } catch { }
       return { action: 'deny' };
     });
   });
 }
 
-// ── Bootstrap ────────────────────────────────────────────────────────────────
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
-  // Strip headers that prevent sites from loading inside the app
+  // Remove tracking/CSP headers so any site loads in the browser
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
@@ -200,16 +227,12 @@ app.whenReady().then(async () => {
     });
   });
 
-  // Register ALL IPC handlers exactly once
-  registerIpcHandlers();
-
+  registerIpcHandlers(); // exactly once — handlers read from module refs
   await createMainWindow();
 
-  // macOS: recreate window when dock icon is clicked and no windows are open
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      // Managers are replaced inside createMainWindow; IPC handlers reuse module refs
-      await createMainWindow();
+      await createMainWindow(); // refs updated inside; IPC handlers reuse them
     }
   });
 });
