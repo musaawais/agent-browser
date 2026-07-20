@@ -1,3 +1,4 @@
+/// <reference lib="dom" />
 /**
  * Stealth preload — injected into every agent tab BEFORE any page scripts run.
  *
