@@ -28,24 +28,17 @@ export class ProxyManager {
     this.state = { enabled: true, current: config };
   }
 
+  /**
+   * Clear the app-level proxy and go back to following the OS network stack.
+   * Using mode:'system' (not 'direct') means the system VPN / system proxy
+   * settings remain in effect — 'direct' would bypass them completely.
+   */
   async clearProxy(): Promise<void> {
-    await session.defaultSession.setProxy({ proxyRules: 'direct://' });
+    await session.defaultSession.setProxy({ mode: 'system' } as any);
     this.state = { enabled: false, current: null };
   }
 
   getState(): ProxyState {
     return { ...this.state };
-  }
-
-  async setProxyForWebContents(
-    webContents: Electron.WebContents,
-    config: ProxyConfig
-  ): Promise<void> {
-    const sess = webContents.session;
-    const proxyRules =
-      config.protocol === 'socks5'
-        ? `socks5://${config.host}:${config.port}`
-        : `http://${config.host}:${config.port}`;
-    await sess.setProxy({ proxyRules });
   }
 }
