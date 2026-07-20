@@ -19,8 +19,22 @@ export const api = (window as any).api as {
     getState: () => Promise<any>;
   };
   agent: {
-    createTask: (input: any) => Promise<any>;
-    startTask: (id: string) => Promise<{ success: boolean; tabId?: string; error?: string }>;
+    createTask: (input: {
+      name: string;
+      keyword: string;
+      urls: string[];
+      country: string;
+      countryCode: string;
+      proxyList: string[];
+      visitCount: number;
+      deviceType: 'desktop' | 'mobile' | 'tablet';
+      timeOnPageMin: number;
+      timeOnPageMax: number;
+      scrollSpeed: 'slow' | 'medium' | 'fast';
+      clickInternalLinks: boolean;
+      maxInternalLinks: number;
+    }) => Promise<any>;
+    startTask: (id: string) => Promise<{ success: boolean; error?: string }>;
     stopTask: (id: string) => Promise<any>;
     deleteTask: (id: string) => Promise<any>;
     getAllTasks: () => Promise<any[]>;
