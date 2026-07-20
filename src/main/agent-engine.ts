@@ -234,6 +234,11 @@ export class AgentEngine {
           else callback('', '');
         });
       }
+    } else {
+      // No explicit proxy — follow OS network settings (respects system VPN).
+      // Fresh fromPartition sessions don't inherit system proxy automatically,
+      // so we must set it explicitly; otherwise VPN traffic is bypassed.
+      try { await ses.setProxy({ mode: 'system' } as any); } catch { /* ignore */ }
     }
 
     // Remove tracking/automation headers
@@ -306,9 +311,10 @@ export class AgentEngine {
         this.emitStatus(task);
         const ok = await this.proxyWorks(wc, 5000);
         if (!ok) {
-          task.logs.push(`${label}: ⚠️ Proxy failed — running direct (IP will be your real IP)`);
+          task.logs.push(`${label}: ⚠️ Proxy failed — falling back to system network (VPN if active, else your real IP)`);
           this.emitStatus(task);
-          try { await ses.setProxy({ proxyRules: 'direct://' }); } catch { }
+          // Use 'system' not 'direct' — 'direct' would bypass VPN tunnels too
+          try { await ses.setProxy({ mode: 'system' } as any); } catch { }
         }
       }
 
