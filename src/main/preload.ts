@@ -11,24 +11,20 @@ const api = {
     goForward: (id: string) => ipcRenderer.invoke('browser:go-forward', id),
     reload: (id: string) => ipcRenderer.invoke('browser:reload', id),
     stop: (id: string) => ipcRenderer.invoke('browser:stop', id),
-    setSidebarWidth: (width: number) =>
-      ipcRenderer.invoke('browser:set-sidebar-width', width),
+    setSidebarWidth: (width: number) => ipcRenderer.invoke('browser:set-sidebar-width', width),
 
-    /** Tab updated by main process (navigation, title, favicon, loading state) */
     onTabUpdated: (cb: (info: TabInfo) => void) => {
       const fn = (_: Electron.IpcRendererEvent, info: TabInfo) => cb(info);
       ipcRenderer.on('tab-updated', fn);
       return () => ipcRenderer.removeListener('tab-updated', fn);
     },
 
-    /** A new tab was created by the main process (e.g. agent task started) */
     onTabCreated: (cb: (info: TabInfo) => void) => {
       const fn = (_: Electron.IpcRendererEvent, info: TabInfo) => cb(info);
       ipcRenderer.on('tab-created', fn);
       return () => ipcRenderer.removeListener('tab-created', fn);
     },
 
-    /** Main process wants to open a URL in a new tab (window.open redirect) */
     onOpenUrl: (cb: (url: string) => void) => {
       const fn = (_: Electron.IpcRendererEvent, url: string) => cb(url);
       ipcRenderer.on('open-url-in-new-tab', fn);
@@ -45,8 +41,7 @@ const api = {
 
   // ── Agent task management ───────────────────────────────────────────────
   agent: {
-    createTask: (input: AgentTaskInput) =>
-      ipcRenderer.invoke('agent:create-task', input),
+    createTask: (input: AgentTaskInput) => ipcRenderer.invoke('agent:create-task', input),
     startTask: (id: string) => ipcRenderer.invoke('agent:start-task', id),
     stopTask: (id: string) => ipcRenderer.invoke('agent:stop-task', id),
     deleteTask: (id: string) => ipcRenderer.invoke('agent:delete-task', id),
@@ -88,15 +83,24 @@ interface ProxyConfig {
   password?: string;
 }
 
+/**
+ * proxyList: one entry per line.
+ * Supported formats:
+ *   host:port
+ *   host:port:username:password
+ *   http://username:password@host:port
+ *   socks5://username:password@host:port
+ *
+ * The agent rotates through this list, one proxy per visit (one IP per session).
+ * Each visit also gets a fresh isolated session so GA4 sees a new user.
+ */
 interface AgentTaskInput {
   name: string;
   keyword: string;
   urls: string[];
   country: string;
   countryCode: string;
-  proxyHost: string;
-  proxyPort: number;
-  proxyProtocol: 'http' | 'socks5';
+  proxyList: string[];
   visitCount: number;
   deviceType: 'desktop' | 'mobile' | 'tablet';
   timeOnPageMin: number;
