@@ -11,19 +11,28 @@ const api = {
     goForward: (id: string) => ipcRenderer.invoke('browser:go-forward', id),
     reload: (id: string) => ipcRenderer.invoke('browser:reload', id),
     stop: (id: string) => ipcRenderer.invoke('browser:stop', id),
-    /** Tell main process the sidebar width so the native browser view
-     *  shrinks to avoid covering the sidebar panel. */
     setSidebarWidth: (width: number) =>
       ipcRenderer.invoke('browser:set-sidebar-width', width),
+
+    /** Tab updated by main process (navigation, title, favicon, loading state) */
     onTabUpdated: (cb: (info: TabInfo) => void) => {
-      const listener = (_: Electron.IpcRendererEvent, info: TabInfo) => cb(info);
-      ipcRenderer.on('tab-updated', listener);
-      return () => ipcRenderer.removeListener('tab-updated', listener);
+      const fn = (_: Electron.IpcRendererEvent, info: TabInfo) => cb(info);
+      ipcRenderer.on('tab-updated', fn);
+      return () => ipcRenderer.removeListener('tab-updated', fn);
     },
+
+    /** A new tab was created by the main process (e.g. agent task started) */
+    onTabCreated: (cb: (info: TabInfo) => void) => {
+      const fn = (_: Electron.IpcRendererEvent, info: TabInfo) => cb(info);
+      ipcRenderer.on('tab-created', fn);
+      return () => ipcRenderer.removeListener('tab-created', fn);
+    },
+
+    /** Main process wants to open a URL in a new tab (window.open redirect) */
     onOpenUrl: (cb: (url: string) => void) => {
-      const listener = (_: Electron.IpcRendererEvent, url: string) => cb(url);
-      ipcRenderer.on('open-url-in-new-tab', listener);
-      return () => ipcRenderer.removeListener('open-url-in-new-tab', listener);
+      const fn = (_: Electron.IpcRendererEvent, url: string) => cb(url);
+      ipcRenderer.on('open-url-in-new-tab', fn);
+      return () => ipcRenderer.removeListener('open-url-in-new-tab', fn);
     },
   },
 
@@ -43,9 +52,9 @@ const api = {
     deleteTask: (id: string) => ipcRenderer.invoke('agent:delete-task', id),
     getAllTasks: () => ipcRenderer.invoke('agent:get-all-tasks'),
     onTaskUpdated: (cb: (task: AgentTask) => void) => {
-      const listener = (_: Electron.IpcRendererEvent, task: AgentTask) => cb(task);
-      ipcRenderer.on('agent:task-updated', listener);
-      return () => ipcRenderer.removeListener('agent:task-updated', listener);
+      const fn = (_: Electron.IpcRendererEvent, task: AgentTask) => cb(task);
+      ipcRenderer.on('agent:task-updated', fn);
+      return () => ipcRenderer.removeListener('agent:task-updated', fn);
     },
   },
 
@@ -60,7 +69,7 @@ const api = {
 
 contextBridge.exposeInMainWorld('api', api);
 
-// ── Type declarations (used by renderer via window.api) ─────────────────────
+// ── Local type definitions ───────────────────────────────────────────────────
 interface TabInfo {
   id: string;
   url: string;
